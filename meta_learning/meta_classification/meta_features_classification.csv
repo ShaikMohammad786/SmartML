@@ -1,0 +1,2 @@
+n_instances,n_features,n_num_features,n_cat_features,missing_values_pct,class_entropy,n_classes,mean_skewness,mean_kurtosis,avg_correlation,max_correlation,mean_mutual_info,max_mutual_info,pca_fraction_95,feature_to_instance_ratio,best_model
+2500,10,5,5,0.0,4.802979277872149,28,0.0011775967330168954,-1.21174554660221,0.012828890275731152,0.036805146541278415,0.2207098971349645,1.9538451690021903,0.5,0.004,

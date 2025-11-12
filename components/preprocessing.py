@@ -33,10 +33,22 @@ class Preproccessor:
         self.y_val = None
         self.pca = None
         self.scaler = None
+        self.task_type=None
 
+    def check_task(self):
+        if not self.target_col:
+            self.task_type="clustering"
+        elif self.df[self.target_col].nunique()<=20:
+            self.task_type="classification"
+        else:
+            self.task_type="regression"
+        
+        return self
+    
+    
     def remove_duplicates(self):
         self.df = self.df.drop_duplicates().reset_index(drop=True)
-
+    
     def splitting(self):
         df = self.df
         X = df.drop(columns=[self.target_col], axis=1)
@@ -305,7 +317,8 @@ class Preproccessor:
 
     def apply_pca(self, variance_threshold=0.95):
       
-
+        if self.X_train.shape[1]<50:
+            return self
         if self.X_train is None:
             raise ValueError("Call splitting() and scaling() before apply_pca().")
 
@@ -420,13 +433,14 @@ class Preproccessor:
         with open(os.path.join(dataset_dir, "info.json"), "w") as f:
             json.dump(meta_info, f, indent=4)
 
-        print(f"✅ Dataset saved successfully to '{dataset_dir}'")
-        print(f"📁 Files:\n  - train.csv\n  - val.csv\n  - test.csv\n  - info.json")
+        print(f" Dataset saved successfully to '{dataset_dir}'")
+        print(f" Files:\n  - train.csv\n  - val.csv\n  - test.csv\n  - info.json")
 
         return self
 
     def run_preprocessing(self):
         self.remove_duplicates()
+        self.check_task()
         self.splitting()
         self.imputing_null_values()
         self.remove_outliers_iqr()
@@ -436,6 +450,8 @@ class Preproccessor:
         self.apply_pca()
         self.data_balancing(random_state=42)
         self.save_dataset()
+        
+        return self.X_train,self.y_train,self.X_test,self.y_test,self.X_val,self.y_val,self.task_type
 
 
 
@@ -444,8 +460,8 @@ class Preproccessor:
 if __name__ == "__main__":
    
 
-    dataset_path = "datasets/classification/transactions.csv"
-    pp = Preproccessor(dataframe=dataset_path,target_col='is_fraud')
+    dataset_path = "../datasets/classification/phone_detection.csv"
+    pp = Preproccessor(dataframe=dataset_path,target_col='price_range')
     pp.run_preprocessing()
     print("\n🚀 Preprocessing pipeline completed and saved successfully.")
 

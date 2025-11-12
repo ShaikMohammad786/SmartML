@@ -1,6 +1,15 @@
+import os
+import sys
+
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
+
 import pandas as pd
 import numpy as np
-from preprocessing import Preproccessor
+import random
+from components.preprocessing import Preproccessor
 from sklearn.linear_model import (
     LinearRegression,
     LogisticRegression,
@@ -14,6 +23,9 @@ from sklearn.preprocessing import PolynomialFeatures
 from sklearn.neighbors import KNeighborsRegressor, KNeighborsClassifier
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from sklearn.svm import SVR, SVC
+
+from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
+from sklearn.metrics import silhouette_score, davies_bouldin_score, calinski_harabasz_score
 from sklearn.ensemble import (
     RandomForestClassifier,
     RandomForestRegressor,
@@ -25,12 +37,12 @@ from sklearn.metrics import (
     mean_absolute_error,
     root_mean_squared_error,
     accuracy_score,
-    classification_report,
-    confusion_matrix,
 )
+
 from sklearn.pipeline import Pipeline
 from sklearn.model_selection import GridSearchCV, KFold, cross_val_score,RandomizedSearchCV,StratifiedKFold
-from typing import Dict, Any
+from typing import Dict, Any, Optional, Iterable
+from meta_learning.meta_features_extraction import meta_features_extract_class,meta_features_extract_reg,meta_features_extract_clust
 
 
 
@@ -41,7 +53,9 @@ class Classification_Training:
                  X_train, y_train,
                  X_test, y_test,
                  X_val, y_val,
-                 random_state: int = 42):
+                 target_col,dataset_path,
+                 random_state: int = 42,
+                 ):
         self.X_train = X_train
         self.y_train = y_train
         self.X_test = X_test
@@ -49,6 +63,8 @@ class Classification_Training:
         self.X_val = X_val
         self.y_val = y_val
         self.random_state = random_state
+        self.dataset_path=dataset_path
+        self.target_col=target_col
 
         # candidate models (preprocessed)
         self.models = {
@@ -65,7 +81,7 @@ class Classification_Training:
             "LogisticRegression": {"C": [0.01, 0.1, 1, 10]},
             "KNN": {"n_neighbors": [3,5,7], "weights": ["uniform","distance"]},
             "DecisionTree": {"max_depth": [None,5,10], "criterion": ["gini","entropy"]},
-            "SVM": {"C": [0.1,1,10], "kernel": ["linear","rbf"]},
+            "SVM": {"C": [0.1,1,10], "kernel": ["linear"]},
             "RandomForest": {"n_estimators": [100,200], "max_depth": [None,10]},
             "GradientBoosting": {"n_estimators": [100,200], "learning_rate": [0.01,0.1]}
         }
@@ -78,14 +94,9 @@ class Classification_Training:
         self.best_model = None
         self.best_val_acc = -np.inf
 
-    # ---------------------------
-    # 1) Fit baseline estimators on full training set (mandatory before tuning)
-    # ---------------------------
+    
     def train_models(self, cv: int = 5, verbose: bool = True):
-        """
-        Fit each model on X_train and record baseline train/cv/val accuracies.
-        cv: used for reporting cross-validated training accuracy (not for tuning here).
-        """
+      
         if self.X_val is None or self.y_val is None:
             raise RuntimeError("Validation set (X_val, y_val) is required for this workflow.")
 
@@ -114,9 +125,6 @@ class Classification_Training:
         self.results = {r["model"]: {"baseline_train_acc": r["train_accuracy"], "baseline_cv_acc": r["cv_train_accuracy"], "baseline_val_acc": r["val_accuracy"]} for r in rows}
         return pd.DataFrame(rows).sort_values("val_accuracy", ascending=False).reset_index(drop=True)
 
-    # ---------------------------
-    # 2) Tune each model with inner CV on train, then evaluate on validation set
-    # ---------------------------
     def tune_models(self,
                              inner_cv: int = 3,
                              search_type: str = "grid",
@@ -125,15 +133,7 @@ class Classification_Training:
                              n_jobs: int = -1,
                              scoring: str = "accuracy",
                              verbose: bool = True):
-        """
-        For each model:
-          - run GridSearchCV (or RandomizedSearchCV if search_type="random") on X_train (inner CV = inner_cv)
-          - obtain best_estimator_ from search
-          - evaluate it on X_val; record val accuracy and best params
-        Finally select the model with highest validation accuracy.
-
-        Returns a dict with per-model summaries and the selected best model.
-        """
+   
         if not self.baselines:
             raise RuntimeError("Call train_baselines() before tune_and_select_best().")
 
@@ -207,6 +207,7 @@ class Classification_Training:
                 if verbose:
                     print(f"  -> Tuning failed for {name}: {e}")
                 continue
+        meta_features_extract_class(self.dataset_path,self.target_col,self.best_model_name)
 
         if verbose:
             print(f"\n[SELECT] Best model by validation accuracy: {self.best_model_name} (val_acc={self.best_val_acc:.4f})")
@@ -222,13 +223,15 @@ class Classification_Training:
 
 class Regression_Training:
 
-    def __init__(self, X_train, y_train, X_test, y_test, X_val, y_val):
+    def __init__(self, X_train, y_train, X_test, y_test, X_val, y_val,dataset_path,target_col):
         self.X_train = X_train
         self.X_test = X_test
         self.X_val = X_val
         self.y_train = y_train
         self.y_test = y_test
         self.y_val = y_val
+        self.dataset_path=dataset_path
+        self.target_col=target_col
         self.results = []
 
     def evaluate_model(self, grid: GridSearchCV, name):
@@ -287,7 +290,7 @@ class Regression_Training:
                 "regressor__min_samples_leaf": [1, 2, 4],
             },
             "SVR": {
-                "regressor__kernel": ["linear", "rbf", "poly"],
+                "regressor__kernel": ["linear"],
                 "regressor__C": [0.1, 1, 10],
                 "regressor__epsilon": [0.01, 0.1, 1],
             },
@@ -351,32 +354,278 @@ class Regression_Training:
         results_df.to_csv("meta_dataset_results.csv", mode="a", index=False)
 
         print("\n[COMPLETE] Results saved to 'meta_dataset_results.csv'")
+        
+        meta_features_extract_reg(self.dataset_path,self.target_col,best_row['Model'])
+        
         return results_df
+        
 
 
 
-# Linear Regression (multiple , polynomial) , KNN , Guassian naive bayes ,
-# D.T , SVM , Random forest , Gradient boost
+
+class ClusteringTrainer:
+
+    def __init__(self, X, random_state: int = 42):
+      
+        self.X = X if not isinstance(X, pd.DataFrame) else X.values
+        self.random_state = random_state
+
+        # Candidate algorithms (factory functions returning new estimators)
+        self.algos = {
+            "KMeans": lambda **p: KMeans(random_state=self.random_state, **p),
+            "DBSCAN": lambda **p: DBSCAN(**p),
+            "Agglomerative": lambda **p: AgglomerativeClustering(**p)
+        }
+
+        # Default parameter grids (small, extend as needed)
+        self.param_grids = {
+            "KMeans": {"n_clusters": [2, 3, 4, 5, 8, 10]},
+            "DBSCAN": {"eps": [0.3, 0.5, 0.8, 1.0], "min_samples": [3, 5, 8]},
+            "Agglomerative": {"n_clusters": [2, 3, 4, 5, 8], "linkage": ["ward", "complete", "average"]}
+        }
+
+        # results containers
+        self.baselines: Dict[str, Any] = {}
+        self.tuned: Dict[str, Any] = {}
+        self.results: pd.DataFrame = pd.DataFrame()
+        self.best_model_name: Optional[str] = None
+        self.best_model: Optional[Any] = None
+        self.best_score: float = -np.inf
+        self.best_metric: str = "silhouette"  # default selection metric
+
+
+    # helpers: scoring
+
+    def _score_labels(self, X, labels):
+        """Compute internal clustering metrics. Labels of -1 (noise) are accepted."""
+        # Need at least 2 clusters for silhouette and CH; DB requires >=1 cluster.
+        unique_labels = set(labels)
+        n_clusters = len([l for l in unique_labels if l != -1])
+        scores = {"n_clusters": n_clusters}
+
+        if n_clusters >= 2:
+            try:
+                scores["silhouette"] = float(silhouette_score(X, labels))
+            except Exception:
+                scores["silhouette"] = float("nan")
+            try:
+                scores["calinski_harabasz"] = float(calinski_harabasz_score(X, labels))
+            except Exception:
+                scores["calinski_harabasz"] = float("nan")
+        else:
+            scores["silhouette"] = float("nan")
+            scores["calinski_harabasz"] = float("nan")
+
+        # Davies-Bouldin exists for n_clusters >= 2 as well, smaller is better
+        if n_clusters >= 2:
+            try:
+                scores["davies_bouldin"] = float(davies_bouldin_score(X, labels))
+            except Exception:
+                scores["davies_bouldin"] = float("nan")
+        else:
+            scores["davies_bouldin"] = float("nan")
+
+        return scores
+
+ 
+    # baseline fitting
+
+    def fit_baselines(self, verbose: bool = True):
+        """
+        Fit baseline versions of each algorithm (first grid value or sensible defaults)
+        and compute cluster metrics.
+        """
+        rows = []
+        for name, factory in self.algos.items():
+            # pick a default param set: first item in param grid or empty
+            grid = self.param_grids.get(name, {})
+            default_params = {k: v[0] for k, v in grid.items()} if grid else {}
+            model = factory(**default_params)
+            # KMeans/Agglomerative need n_clusters; ensure sensible default if not present
+            try:
+                labels = model.fit_predict(self.X)
+            except Exception:
+                # Some algorithms (e.g. DBSCAN) may not have fit_predict method for edge cases
+                model.fit(self.X)
+                labels = model.labels_ if hasattr(model, "labels_") else model.predict(self.X)
+            scores = self._score_labels(self.X, labels)
+            rows.append({"algo": name, "params": default_params, **scores})
+            self.baselines[name] = {"model": clone(model), "labels": labels, "scores": scores}
+            if verbose:
+                print(f"[BASELINE] {name} params={default_params} -> n_clusters={scores['n_clusters']}, silhouette={scores['silhouette']}")
+        self.results = pd.DataFrame(rows)
+        return self.results.sort_values(by="silhouette", ascending=False).reset_index(drop=True)
+
+
+    def search(self,
+               algo_name: str,
+               search_type: str = "grid",
+               n_iter: int = 20,
+               score_metric: str = "silhouette",
+               random_state: Optional[int] = None,
+               verbose: bool = True):
+      
+        if random_state is None:
+            random_state = self.random_state
+
+        if algo_name not in self.algos:
+            raise ValueError(f"Unknown algorithm: {algo_name}")
+
+        grid = self.param_grids.get(algo_name, {})
+        if not grid:
+            raise ValueError(f"No parameter grid defined for {algo_name}")
+
+        # build list of candidate param dicts
+        keys = list(grid.keys())
+        all_candidates = []
+        if search_type == "grid":
+            # cartesian product (simple)
+            import itertools
+            for vals in itertools.product(*(grid[k] for k in keys)):
+                all_candidates.append(dict(zip(keys, vals)))
+        else:
+            # random sampling without replacement
+            candidates_set = set()
+            attempts = 0
+            max_attempts = max(n_iter * 10, 1000)
+            while len(all_candidates) < n_iter and attempts < max_attempts:
+                cand = {}
+                for k in keys:
+                    cand[k] = random.choice(grid[k])
+                tup = tuple(sorted(cand.items()))
+                if tup not in candidates_set:
+                    candidates_set.add(tup)
+                    all_candidates.append(cand)
+                attempts += 1
+
+        rows = []
+        best_score = -np.inf if score_metric != "davies_bouldin" else np.inf
+        best_model = None
+        best_labels = None
+        best_params = None
+
+        for params in all_candidates:
+            # instantiate model
+            model = self.algos[algo_name](**params)
+            try:
+                labels = model.fit_predict(self.X)
+            except Exception:
+                model.fit(self.X)
+                labels = getattr(model, "labels_", None)
+                if labels is None and hasattr(model, "predict"):
+                    labels = model.predict(self.X)
+                if labels is None:
+                    # skip if we can't get labels
+                    continue
+
+            scores = self._score_labels(self.X, labels)
+            # choose metric comparison
+            metric_val = scores.get(score_metric)
+            if score_metric == "davies_bouldin":
+                is_better = metric_val < best_score
+            else:
+                is_better = metric_val > best_score
+
+            if is_better or best_model is None:
+                best_score = metric_val
+                best_model = clone(model)
+                best_labels = labels
+                best_params = params
+
+            rows.append({"algo": algo_name, "params": params, **scores})
+
+            if verbose:
+                print(f"[TRY] {algo_name} params={params} -> n_clusters={scores['n_clusters']}, silhouette={scores['silhouette']}, DB={scores['davies_bouldin']:.4f}")
+
+        df_results = pd.DataFrame(rows).sort_values(by="silhouette", ascending=False).reset_index(drop=True)
+        # store best
+        self.tuned[algo_name] = {"model": best_model, "params": best_params, "labels": best_labels, "score": best_score, "metric": score_metric}
+        # also append to global results
+        self.results = pd.concat([self.results, df_results], ignore_index=True, sort=False).reset_index(drop=True)
+        if verbose:
+            print(f"[BEST] {algo_name} best_params={best_params} best_{score_metric}={best_score}")
+        return df_results
+
+   
+    # select best across algorithms
+   
+    def select_best(self, metric: str = "silhouette"):
+        """
+        Select the best tuned model (or baseline if not tuned) based on metric.
+        metric: 'silhouette', 'davies_bouldin' (lower is better), or 'calinski_harabasz'
+        """
+        best = None
+        best_val = -np.inf if metric != "davies_bouldin" else np.inf
+        best_name = None
+        best_obj = None
+
+        # check tuned first, then baselines
+        candidates = []
+        for name in set(list(self.tuned.keys()) + list(self.baselines.keys())):
+            if name in self.tuned and self.tuned[name]["model"] is not None:
+                entry = self.tuned[name]
+                score = entry["score"]
+            else:
+                entry = self.baselines.get(name)
+                score = entry["scores"].get(metric) if entry is not None else float("nan")
+
+            if score is None or (isinstance(score, float) and np.isnan(score)):
+                continue
+
+            if metric == "davies_bouldin":
+                better = score < best_val
+            else:
+                better = score > best_val
+
+            if better or best is None:
+                best = entry
+                best_val = score
+                best_name = name
+
+        self.best_model_name = best_name
+        self.best_model = best["model"] if best is not None else None
+        self.best_score = best_val
+        self.best_metric = metric
+        print(f"[SELECT] Best algorithm: {self.best_model_name} (metric={metric}, value={best_val})")
+        return {"best_name": self.best_model_name, "best_model": self.best_model, "best_score": self.best_score}
+
+ 
+
+    def get_labels(self, model_obj, X=None):
+       
+        if X is None:
+            X = self.X
+        try:
+            return model_obj.fit_predict(X)
+        except Exception:
+            try:
+                model_obj.fit(X)
+                return getattr(model_obj, "labels_", None)
+            except Exception:
+                raise RuntimeError("Model cannot produce labels on given data.")
+
+    
+
 
 
 if __name__ == "__main__":
-    dataset_path = "datasets/regression/synthetic_car_prices.csv"
-    preprocessor = Preproccessor(dataset_path, "Price")
-    X_train, y_train, X_test, y_test, X_val, y_val, task_type = (
-        preprocessor.run_preprocessing()
-    )
-    trainer = Regression_Training(X_train, y_train, X_test, y_test, X_val, y_val)
-    trainer.train_model()
-
-
-    # dataset_path = "datasets/classification/phone_detection.csv"
-    # preprocessor = Preproccessor(dataset_path, "price_range")
+    # dataset_path = "datasets/regression/synthetic_car_prices.csv"
+    # preprocessor = Preproccessor(dataset_path, "Price")
     # X_train, y_train, X_test, y_test, X_val, y_val, task_type = (
     #     preprocessor.run_preprocessing()
     # )
-    # trainer = Classification_Training(X_train, y_train, X_test, y_test, X_val, y_val,42)
-    # trainer.train_models()
+    # trainer = Regression_Training(X_train, y_train, X_test, y_test, X_val, y_val,dataset_path,"Price")
+    # trainer.train_model()
+
+
+    dataset_path = "datasets/classification/synthetic.csv"
+    preprocessor = Preproccessor(dataset_path, "target")
+    X_train, y_train, X_test, y_test, X_val, y_val, task_type = (
+        preprocessor.run_preprocessing()
+    )
+    trainer = Classification_Training(X_train, y_train, X_test, y_test, X_val, y_val,dataset_path=dataset_path,target_col='target')
+    trainer.train_models()
   
-    # trainer.tune_models()
+    trainer.tune_models()
   
   

@@ -35,7 +35,7 @@ def mean_feature_entropy_auto(numeric_df):
     return np.mean(entropies) if entropies else np.nan
 
 
-def meta_features_extract_reg(dataset: str, target_col: str):
+def meta_features_extract_reg(dataset: str, target_col: str,best_model:str):
     try:
        
         dest = pd.read_csv('meta_regression/meta_features_regression.csv')
@@ -118,7 +118,7 @@ def meta_features_extract_reg(dataset: str, target_col: str):
         print(f"⚠️ Error calculating entropy: {e}")
         mean_feature_entropy = np.nan
 
-    best_model = None
+    best_model = best_model
 
     # === Combine all meta-features ===
     meta_features = {
@@ -146,16 +146,16 @@ def meta_features_extract_reg(dataset: str, target_col: str):
     try:
         meta_row = pd.DataFrame([meta_features])
         dest = pd.concat([dest, meta_row], ignore_index=True)
-        dest.to_csv("meta_regression/meta_features_regression.csv", index=False)
+        dest.to_csv("meta_learning/meta_regression/meta_features_regression.csv", index=False)
         print("✅ Meta-features successfully extracted and saved.")
     except Exception as e:
         print(f" Error saving meta-features: {e}")
 
 
-def meta_features_extract_class(dataset_path,target_col_index=None):
+def meta_features_extract_class(dataset_path,target_col,best_model):
   
     df = pd.read_csv(dataset_path)
-    meta_csv='meta_classification/meta_features_classification.csv'
+    meta_csv='meta_learning/meta_classification/meta_features_classification.csv'
     meta = pd.read_csv(meta_csv)
 
         
@@ -174,14 +174,9 @@ def meta_features_extract_class(dataset_path,target_col_index=None):
     total_values = max(1, n_instances * n_features)
     missing_values_pct = float(total_missing) / total_values * 100.0
 
-    # --- target ---
-    if target_col_index is None:
-        target_col_index = max(0, n_features - 1)
-    if target_col_index >= n_features:
-        raise IndexError("target_col_index out of range")
+ 
 
-    target_col_name = df.columns[target_col_index]
-    target_series = df.iloc[:, target_col_index].dropna()
+    target_series = df[target_col].dropna()
 
     # --- class entropy ---
     if target_series.empty:
@@ -193,8 +188,8 @@ def meta_features_extract_class(dataset_path,target_col_index=None):
             class_entropy = 0.0
 
     # --- n_classes and majority frac ---
-    n_classes = int(df[target_col_name].nunique(dropna=True))
-    majority_frac = float(df[target_col_name].value_counts(normalize=True, dropna=True).max()) if n_classes > 0 else 0.0
+    n_classes = int(df[target_col].nunique(dropna=True))
+    majority_frac = float(df[target_col].value_counts(normalize=True, dropna=True).max()) if n_classes > 0 else 0.0
 
     # --- skewness & kurtosis ---
     mean_skewness = float(numeric_df.skew().mean()) if not numeric_df.empty else 0.0
@@ -215,7 +210,7 @@ def meta_features_extract_class(dataset_path,target_col_index=None):
             max_corr = float(stacked.max()) if not stacked.empty else 0.0
 
     # --- mutual info ---
-    X = df.drop(columns=[df.columns[target_col_index]])
+    X = df.drop(columns=[target_col])
     X = X.select_dtypes(include=['int64', 'float64', 'object', 'category']).copy()
     for col in X.select_dtypes(include=['object', 'category']).columns:
         X[col] = X[col].astype('category').cat.codes
@@ -257,7 +252,7 @@ def meta_features_extract_class(dataset_path,target_col_index=None):
             n_comp_95 = 0
 
     feature_to_instance_ratio = float(n_features / max(1, n_instances))
-    best_model = None  
+    best_model = best_model  
     
 
     
@@ -279,7 +274,7 @@ def meta_features_extract_class(dataset_path,target_col_index=None):
         "feature_to_instance_ratio": feature_to_instance_ratio,
         "task_type" : "Classification",
         "best_model": best_model,
-      
+
     }
 
     
@@ -451,10 +446,9 @@ def meta_features_extract_clust(dataset_path,sample_limit=10000,k_min=2,k_max=10
         davies_bouldin = np.nan
         calinski_harabasz = np.nan
 
-    # --- Feature-to-instance ratio ---
+    
     feature_to_instance_ratio = float(n_features / max(1, n_instances))
 
-    # --- Build row ---
     new_row = {
         "n_instances": int(n_instances),
         "n_features": int(n_features),

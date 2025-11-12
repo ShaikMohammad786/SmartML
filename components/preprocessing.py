@@ -23,7 +23,7 @@ from datetime import datetime
 
 class Preproccessor:
     def __init__(self, dataframe, target_col):
-        self.df = pd.read_csv(dataframe)
+        self.df = pd.read_csv(dataframe,header=0)
         self.target_col = target_col
         self.X_train = None
         self.y_train = None
@@ -59,129 +59,203 @@ class Preproccessor:
         self.X_val, self.X_test, self.y_val, self.y_test = train_test_split(
             X_temp, y_temp, test_size=0.5, random_state=42
         )
-
+    
     def imputing_null_values(self, discrete_threshold=20, n_neighbors=3):
+        """
+        Imputes missing values robustly using:
+        - Mode for categorical columns
+        - Mean for continuous numeric columns
+        - KNN for discrete numeric columns
+        - Fallback imputation for any remaining NaNs
+        """
 
-        X_train, X_test, X_val = (
-            self.X_train.copy(),
-            self.X_test.copy(),
-            self.X_val.copy(),
-        )
-        num_cols = X_train.select_dtypes(include=[np.number]).columns
-        cat_cols = X_train.select_dtypes(exclude=[np.number]).columns
+        print("\n🔹 Starting missing value imputation...")
 
-        # Handle categorical columns
+        X_train = self.X_train.copy()
+        X_test = self.X_test.copy() if self.X_test is not None else None
+        X_val = self.X_val.copy() if self.X_val is not None else None
+
+        num_cols = X_train.select_dtypes(include=[np.number]).columns.tolist()
+        cat_cols = X_train.select_dtypes(exclude=[np.number]).columns.tolist()
+
+        # 1️⃣ Categorical imputation (mode)
         for col in cat_cols:
-            mode_val = X_train[col].mode()
-            if not mode_val.empty:
-                X_train[col].fillna(mode_val[0], inplace=True)
-                X_test[col].fillna(mode_val[0], inplace=True)
-                X_val[col].fillna(mode_val[0], inplace=True)
+            mode_vals = X_train[col].mode()
+            if not mode_vals.empty:
+                mode_val = mode_vals.iloc[0]
+                X_train[col] = X_train[col].fillna(mode_val)
+                if X_test is not None:
+                    X_test[col] = X_test[col].fillna(mode_val)
+                if X_val is not None:
+                    X_val[col] = X_val[col].fillna(mode_val)
 
-        # Split numeric columns into discrete vs continuous
-        discrete_cols = [
-            col
-            for col in num_cols
-            if X_train[col].nunique(dropna=True) <= discrete_threshold
-        ]
-        continuous_cols = [col for col in num_cols if col not in discrete_cols]
+        # 2️⃣ Separate numeric columns
+        discrete_cols = [c for c in num_cols if X_train[c].nunique(dropna=True) <= discrete_threshold]
+        continuous_cols = [c for c in num_cols if c not in discrete_cols]
 
-        # Handle continuous columns with mean
+        # 3️⃣ Continuous numeric imputation (mean)
         for col in continuous_cols:
             mean_val = X_train[col].mean()
-            X_train[col].fillna(mean_val, inplace=True)
-            X_test[col].fillna(mean_val, inplace=True)
-            X_val[col].fillna(mean_val, inplace=True)
+            X_train[col] = X_train[col].fillna(mean_val)
+            if X_test is not None:
+                X_test[col] = X_test[col].fillna(mean_val)
+            if X_val is not None:
+                X_val[col] = X_val[col].fillna(mean_val)
 
-        # Handle discrete numeric columns with KNN + rounding
-        if discrete_cols:
-            scaler = StandardScaler()
-            imputer = KNNImputer(n_neighbors=n_neighbors)
-            knn_train = scaler.fit_transform(X_train[discrete_cols])
-            imputer.fit(knn_train)
+        # 4️⃣ Discrete numeric imputation (KNN)
+        if len(discrete_cols) > 0:
+            X_train_discrete = X_train[discrete_cols].copy()
+            if X_train_discrete.isna().all().all() or X_train_discrete.shape[1] == 0:
+                print("⚠️ No valid discrete numeric columns to impute (all NaN or empty). Skipping KNN.")
+            else:
+                scaler = StandardScaler()
+                imputer = KNNImputer(n_neighbors=n_neighbors)
+                try:
+                    knn_train_scaled = scaler.fit_transform(X_train_discrete)
+                    imputed_train_scaled = imputer.fit_transform(knn_train_scaled)
+                    imputed_train_unscaled = np.round(scaler.inverse_transform(imputed_train_scaled))
 
-            def impute(df):
-                scaled = scaler.transform(df[discrete_cols])
-                imputed = imputer.transform(scaled)
-                unscaled = np.round(scaler.inverse_transform(imputed))
-                df[discrete_cols] = pd.DataFrame(
-                    unscaled, columns=discrete_cols, index=df.index
-                )
-                return df
+                    X_train[discrete_cols] = pd.DataFrame(imputed_train_unscaled, columns=discrete_cols, index=X_train.index)
 
-            self.X_train, self.X_test, self.X_val = (
-                impute(X_train),
-                impute(X_test),
-                impute(X_val),
-            )
+                    def _impute_other(df):
+                        if df is None or df.empty:
+                            return df
+                        df_discrete = df[discrete_cols].copy()
+                        if df_discrete.shape[1] == 0:
+                            return df
+                        scaled = scaler.transform(df_discrete)
+                        imputed_scaled = imputer.transform(scaled)
+                        imputed_unscaled = np.round(scaler.inverse_transform(imputed_scaled))
+                        df[discrete_cols] = pd.DataFrame(imputed_unscaled, columns=discrete_cols, index=df.index)
+                        return df
 
+                    X_test = _impute_other(X_test)
+                    X_val = _impute_other(X_val)
+
+                except ValueError as e:
+                    print(f"⚠️ Skipping KNN imputation due to: {e}")
+        else:
+            print("ℹ️ No discrete numeric columns detected — skipping KNN imputation.")
+
+        # 5️⃣ Final Fallback — fill any remaining NaNs (numeric → mean, categorical → mode)
+        print("🔍 Checking for any remaining missing values...")
+        all_cols = X_train.columns
+        fallback_counts = {}
+        for df_name, df in {"train": X_train, "val": X_val, "test": X_test}.items():
+            if df is None:
+                continue
+            nan_cols = df.columns[df.isna().any()].tolist()
+            if nan_cols:
+                fallback_counts[df_name] = nan_cols
+                for col in nan_cols:
+                    if col in num_cols:
+                        fill_val = X_train[col].mean()
+                    else:
+                        mode_vals = X_train[col].mode()
+                        fill_val = mode_vals.iloc[0] if not mode_vals.empty else 0
+                    df[col] = df[col].fillna(fill_val)
+
+        if fallback_counts:
+            print(f"✅ Fallback imputation applied to remaining NaNs: {json.dumps(fallback_counts, indent=4)}")
+        else:
+            print("✅ No remaining missing values detected after main imputations.")
+
+        # 6️⃣ Save back to instance
+        self.X_train = X_train.reset_index(drop=True)
+        if X_test is not None:
+            self.X_test = X_test.reset_index(drop=True)
+        if X_val is not None:
+            self.X_val = X_val.reset_index(drop=True)
+
+        print("🎯 Imputation complete. All datasets are now free of missing values.\n")
         return self
 
-    def remove_outliers_iqr(self, factor=1.5, min_violations=3, min_frac=0.10):
-        # safety
+
+    def remove_outliers_iqr(self, factor=1.5, min_violations=3, min_frac=0.10, nan_threshold_frac=0.10):
+    
         if self.X_train is None:
             raise ValueError("Call splitting() before remove_outliers_iqr().")
 
-        # copies
         X_train = self.X_train.copy()
+        y_train = self.y_train.copy() if self.y_train is not None else None
         X_val = self.X_val.copy() if self.X_val is not None else None
         X_test = self.X_test.copy() if self.X_test is not None else None
 
-        # numeric columns
+        X_train = X_train.reset_index(drop=True)
+        if y_train is not None:
+            y_train = y_train.reset_index(drop=True)
+
         num_cols = X_train.select_dtypes(include=[np.number]).columns.tolist()
         if len(num_cols) == 0:
             print("No numeric columns to check for outliers.")
+            self.X_train, self.y_train = X_train, y_train
             return self
 
-        # compute IQR bounds on training data only
+        # 🧠 Intelligent NaN handling
+        nan_stats = X_train[num_cols].isna().mean()
+        to_drop = nan_stats[nan_stats >= nan_threshold_frac].index.tolist()
+        to_fill = nan_stats[(nan_stats > 0) & (nan_stats < nan_threshold_frac)].index.tolist()
+
+        if to_drop:
+            print(f"⚠️ Dropping {len(to_drop)} numeric columns with ≥{nan_threshold_frac*100:.0f}% NaNs: {to_drop}")
+            X_train.drop(columns=to_drop, inplace=True)
+            if X_val is not None:
+                X_val.drop(columns=[c for c in to_drop if c in X_val.columns], inplace=True)
+            if X_test is not None:
+                X_test.drop(columns=[c for c in to_drop if c in X_test.columns], inplace=True)
+
+            num_cols = [c for c in num_cols if c not in to_drop]
+
+        if to_fill:
+            print(f"🩹 Filling {len(to_fill)} columns with mean (NaNs < {nan_threshold_frac*100:.0f}%): {to_fill}")
+            for col in to_fill:
+                mean_val = X_train[col].mean()
+                X_train[col].fillna(mean_val, inplace=True)
+                if X_val is not None and col in X_val.columns:
+                    X_val[col].fillna(mean_val, inplace=True)
+                if X_test is not None and col in X_test.columns:
+                    X_test[col].fillna(mean_val, inplace=True)
+
+        # --- IQR Outlier Removal ---
         Q1 = X_train[num_cols].quantile(0.25)
         Q3 = X_train[num_cols].quantile(0.75)
         IQR = Q3 - Q1
         lower = Q1 - factor * IQR
         upper = Q3 + factor * IQR
 
-        # boolean DataFrame: True where value is outside bounds
         is_low = X_train[num_cols].lt(lower)
         is_high = X_train[num_cols].gt(upper)
         violations = (is_low | is_high)
-
-        # per-row violation counts
         viol_count = violations.sum(axis=1)
 
-        # threshold based on fraction
         n_numeric = len(num_cols)
         frac_threshold = max(1, int(np.ceil(min_frac * n_numeric)))
-        # final threshold is whichever is smaller? we remove if either condition met
         threshold = min_violations
-
-        # build remove mask: remove if viol_count >= min_violations OR viol_count >= frac_threshold
-        remove_mask = (viol_count >= min_violations) | (viol_count >= frac_threshold)
+        remove_mask = (viol_count >= threshold) | (viol_count >= frac_threshold)
         n_removed = int(remove_mask.sum())
 
-        # diagnostics
         col_viol_counts = violations.sum().sort_values(ascending=False)
         print(f"IQR factor={factor}. Numeric cols: {n_numeric}.")
         print(f"Per-row removal thresholds -> min_violations={min_violations}, min_frac={min_frac} (=> {frac_threshold} cols).")
         print("Top offending numeric columns (violation counts):")
         print(col_viol_counts.head(10))
 
-        # apply removal only on training set
         if n_removed > 0:
             X_train_filtered = X_train.loc[~remove_mask].reset_index(drop=True)
-            if self.y_train is not None:
-                self.y_train = self.y_train.loc[~remove_mask].reset_index(drop=True)
+            if y_train is not None:
+                y_train_filtered = y_train.loc[~remove_mask.values].reset_index(drop=True)
+            else:
+                y_train_filtered = None
             self.X_train = X_train_filtered
-            print(f"Removed {n_removed} training rows (out of {len(X_train)}).")
+            self.y_train = y_train_filtered
+            print(f"✅ Removed {n_removed} training rows (out of {len(X_train)}).")
         else:
-            print("No training rows removed (no rows met conservative removal criteria).")
+            print("✅ No training rows removed (no outliers met criteria).")
 
-        # leave X_val and X_test unchanged
         self.X_val = X_val
         self.X_test = X_test
 
         return self
-
-
 
     def universal_encoder(self, cardinality_threshold=10):
         X_train, X_val, X_test = (
@@ -234,7 +308,7 @@ class Preproccessor:
 
                     df_temp = pd.DataFrame({col: X_train[col], self.target_col: y})
                     means = df_temp.groupby(col)[self.target_col].mean()
-                    X_train[col] = X_train[col].map(means)
+                    X_train[col] = X_train[col].map(means).fillna(means.mean())
                     X_val[col] = X_val[col].map(means).fillna(means.mean())
                     X_test[col] = X_test[col].map(means).fillna(means.mean())
                     encoders[col] = {"type": "target", "mapping": means.to_dict()}
@@ -242,7 +316,7 @@ class Preproccessor:
                 # 3️ High-cardinality + no target → Frequency Encoding
                 else:
                     freqs = X_train[col].value_counts(normalize=True)
-                    X_train[col] = X_train[col].map(freqs)
+                    X_train[col] = X_train[col].map(freqs).fillna(0)
                     X_val[col] = X_val[col].map(freqs).fillna(0)
                     X_test[col] = X_test[col].map(freqs).fillna(0)
                     encoders[col] = {"type": "frequency", "mapping": freqs.to_dict()}
@@ -316,7 +390,8 @@ class Preproccessor:
 
 
     def apply_pca(self, variance_threshold=0.95):
-      
+        print("\nNaN check before PCA:")
+        print(self.X_train.isna().sum()[self.X_train.isna().sum() > 0])
         if self.X_train.shape[1]<50:
             return self
         if self.X_train is None:
